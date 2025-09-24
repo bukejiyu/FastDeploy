@@ -115,10 +115,13 @@ def slice_fn(weight_or_paramter, output_dim, start, end, step=1):
         shape = weight_or_paramter.shape
     if len(shape) == 1:
         weight_or_paramter = weight_or_paramter[start:end]
+        # weight_or_paramter = weight_or_paramter.narrow(0,start,end-start)
     elif output_dim:
         weight_or_paramter = weight_or_paramter[..., start:end]
+        # weight_or_paramter = weight_or_paramter.narrow(1,start,end-start)
     else:
         weight_or_paramter = weight_or_paramter[start:end, ...]
+        # weight_or_paramter = weight_or_paramter.narrow(0,start,end-start)
     return weight_or_paramter
 
 
@@ -188,7 +191,12 @@ def default_weight_loader(fd_config: FDConfig) -> None:
         assert param.shape == loaded_weight.shape, (
             f" Attempted to load weight ({loaded_weight.shape}) " f"into parameter ({param.shape})"
         )
-        param.copy_(loaded_weight, False)
+        param.copy_(loaded_weight)
+        # if output_dim:
+        #     param.copy_(loaded_weight)
+        # else:
+        #     param.copy_(loaded_weight,False)
+        # param.copy_(loaded_weight,False)
 
     return fn
 
@@ -240,7 +248,7 @@ def rename_offline_ckpt_suffix_to_fd_suffix(
     }
     moe_quant_type = ""
     dense_quant_type = ""
-    if fd_config.quant_config is None:
+    if fd_config.quant_config is not None:
         if fd_config.quant_config.name() == "mix_quant":
             moe_quant_type = fd_config.quant_config.moe_quant_type
             dense_quant_type = fd_config.quant_config.dense_quant_type

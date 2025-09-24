@@ -235,8 +235,8 @@ class TritonWeightOnlyMoEMethod(QuantMethodBase):
                 default_initializer=paddle.nn.initializer.Constant(0),
             ),
         )
-        getattr(layer, weight_name).copy_(quanted_weight, False)
-        getattr(layer, scale_name).copy_(quanted_weight_scale, False)
+        getattr(layer, weight_name).copy_(quanted_weight)
+        getattr(layer, scale_name).copy_(quanted_weight_scale)
 
     def apply(
         self,
@@ -860,7 +860,7 @@ class BlockWiseFP8MoEMethod(QuantMethodBase):
             weight_quant, scale[expert_id] = per_block_cast_to_fp8(
                 getattr(layer, unquantized_weight_name)[expert_id], self.quant_config.weight_block_size
             )
-            weight[expert_id].copy_(weight_quant, False)
+            weight[expert_id].copy_(weight_quant)
         getattr(layer, unquantized_weight_name).value().get_tensor()._clear()
 
         # create weight
@@ -891,8 +891,8 @@ class BlockWiseFP8MoEMethod(QuantMethodBase):
                 default_initializer=paddle.nn.initializer.Constant(0),
             ),
         )
-        getattr(layer, weight_name).copy_(weight.transpose([0, 2, 1]).contiguous(), False)
-        getattr(layer, scale_name).copy_(scale.transpose([0, 2, 1]).contiguous(), False)
+        getattr(layer, weight_name).copy_(weight.transpose([0, 2, 1]).contiguous())
+        getattr(layer, scale_name).copy_(scale.transpose([0, 2, 1]).contiguous())
 
     def process_loaded_weights(self, layer: nn.Layer, state_dict):
         """

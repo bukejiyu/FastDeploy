@@ -371,7 +371,7 @@ class MergedReplicatedLinear(ReplicatedLinear):
                 loaded_weight = loaded_weight.view(param.dtype)
             else:
                 loaded_weight = loaded_weight.cast(param.dtype)
-        param.copy_(loaded_weight, False)
+        param.copy_(loaded_weight,False)
 
 
 class ColumnParallelLinear(LinearBase):
@@ -509,6 +509,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 loaded_weight_shard = slice_fn(
                     loaded_weight, output_dim, start=shard_offset, end=shard_offset + shard_size
                 )
+                # print(loaded_weight_shard)
+                # import pdb;pdb.set_trace()
                 self.weight_loader(param, loaded_weight_shard, shard_id)
         else:
             # split gate up
@@ -548,7 +550,15 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     loaded_weight = loaded_weight.view(param.dtype)
                 else:
                     loaded_weight = loaded_weight.cast(param.dtype)
-            param.copy_(loaded_weight, False)
+            # print(loaded_weight)
+            # print(param)
+            param.copy_(loaded_weight)
+            # if output_dim:
+            #     param.copy_(loaded_weight)
+            # else:
+            #     # param.set_value(loaded_weight)
+            # param.copy_(loaded_weight,False)
+            # import pdb;pdb.set_trace()
 
     def load_state_dict(self, state_dict: dict):
         """
@@ -650,6 +660,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                 loaded_weight_shard = slice_fn(
                     loaded_weight, output_dim, start=shard_offset, end=shard_offset + shard_size
                 )
+                # print(loaded_weight_shard)
+                # import pdb;pdb.set_trace()
                 self.weight_loader(param, loaded_weight_shard, shard_id)
         else:
             # split q k v
@@ -669,7 +681,6 @@ class QKVParallelLinear(ColumnParallelLinear):
 
             if not param._is_initialized():
                 param.initialize()
-
             if loaded_shard_id == "q":
 
                 param_shard_offset = 0
@@ -694,7 +705,13 @@ class QKVParallelLinear(ColumnParallelLinear):
                     loaded_weight = loaded_weight.view(param.dtype)
                 else:
                     loaded_weight = loaded_weight.cast(param.dtype)
-            param.copy_(loaded_weight, False)
+            param.copy_(loaded_weight)
+
+            # if output_dim:
+            #     param.copy_(loaded_weight)
+            # else:
+            #     # param.set_value(loaded_weight)
+            # param.copy_(loaded_weight,False)
 
     def load_weight(self, state_dict: dict):
         """

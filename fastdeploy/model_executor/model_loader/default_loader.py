@@ -88,4 +88,11 @@ class DefaultModelLoader(BaseModelLoader):
 
         # TODO(gongshaotian): Now, only support safetensor
         self.load_weights(model, fd_config, architectures)
+        # for k,v in model.state_dict().items():
+        #     # if k=="ernie.layers.0.self_attn.qkv_proj.weight":
+        #     print(k)
+        #     print(v)
+        # paddle.distributed.communication.group.Group.__deepcopy__ = lambda self, _: self
+        # paddle.distributed.communication.group.Group.to_json = lambda self: repr(self)
+        # paddle.save(model.state_dict(), f"/workspace/FastDeploy/bh_test/old_copy_tp{fd_config.parallel_config.tensor_parallel_rank}.pdparams")
         return model

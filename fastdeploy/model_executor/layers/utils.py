@@ -106,7 +106,7 @@ def _set_var_distributed(var: Tensor, split_axis: int):
         main_block._find_var_recursive(var.name).is_distributed = True
 
 
-def get_tensor(input: Union[paddle.Tensor, np.ndarray, str], model_path=None) -> paddle.Tensor:
+def get_tensor(input: Union[paddle.Tensor, np.ndarray, str], model_path=None,to_gpu=False) -> paddle.Tensor:
     """
     Return a corresponding PaddlePaddle tensor based on the type and content of the input.
 
@@ -118,14 +118,17 @@ def get_tensor(input: Union[paddle.Tensor, np.ndarray, str], model_path=None) ->
 
     """
     if "PySafeSlice" in str(type(input)):
-        input = input.get()
-
+        return input[:]
+    #     # print(input)
+    #     # print(input[:])
+    #     import pdb;pdb.set_trace()
+        # input = input.get()
     if isinstance(input, paddle.Tensor):
-        if input.place.is_cpu_place():
-            return input.to(paddle.device.get_device())
+        # if to_gpu and input.place.is_cpu_place():
+            # return input.to(paddle.device.get_device())
         return input
     elif isinstance(input, np.ndarray):
-        return paddle.to_tensor(input)
+        return paddle.to_tensor(input, place="cpu")
     elif isinstance(input, str):
         from fastdeploy.model_executor.load_weight_utils import load_reordered_experts
 

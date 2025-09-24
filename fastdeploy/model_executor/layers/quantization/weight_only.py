@@ -308,8 +308,8 @@ class WeightOnlyLinearMethod(QuantMethodBase):
             is_bias=False,
             default_initializer=paddle.nn.initializer.Constant(0),
         )
-        layer.weight.copy_(quanted_weight_tensor, False)
-        layer.weight_scale.copy_(weight_scale_tensor, False)
+        layer.weight.copy_(quanted_weight_tensor)
+        layer.weight_scale.copy_(weight_scale_tensor)
 
     @abstractmethod
     def process_loaded_weights(self, layer, weights) -> None:

@@ -1167,8 +1167,8 @@ class CutlassWeightOnlyMoEMethod(CutlassMoEMethod):
                 default_initializer=paddle.nn.initializer.Constant(0),
             ),
         )
-        getattr(layer, weight_name).copy_(weight, False)
-        getattr(layer, scale_name).copy_(scale, False)
+        getattr(layer, weight_name).copy_(weight)
+        getattr(layer, scale_name).copy_(scale)
 
     def process_loaded_weights(self, layer: nn.Layer, state_dict):
         """

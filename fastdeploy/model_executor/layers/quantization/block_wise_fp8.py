@@ -169,8 +169,8 @@ class BlockWiseFP8LinearMethod(QuantMethodBase):
             default_initializer=paddle.nn.initializer.Constant(0),
         )
 
-        layer.weight.copy_(quanted_weight_tensor, False)
-        layer.weight_scale_inv.copy_(weight_block_scale_tensor, False)
+        layer.weight.copy_(quanted_weight_tensor)
+        layer.weight_scale_inv.copy_(weight_block_scale_tensor)
 
     def process_loaded_weights(self, layer, weights) -> None:
         weight_tensor = weights.transpose([1, 0])

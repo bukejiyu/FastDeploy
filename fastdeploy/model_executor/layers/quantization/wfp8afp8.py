@@ -158,8 +158,8 @@ class WFP8AFP8LinearMethod(QuantMethodBase):
             default_initializer=paddle.nn.initializer.Constant(0),
         )
 
-        layer.weight.copy_(qweight, False)
-        layer.weight_scale.copy_(weight_scale, False)
+        layer.weight.copy_(qweight)
+        layer.weight_scale.copy_(weight_scale)
 
     def process_loaded_weights(self, layer, weights) -> None:
         """ """

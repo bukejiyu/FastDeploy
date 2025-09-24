@@ -29,7 +29,7 @@ from fastdeploy.model_executor.load_weight_utils import (
 from fastdeploy.model_executor.model_loader.base_loader import BaseModelLoader
 from fastdeploy.model_executor.models.model_base import ModelRegistry
 from fastdeploy.platforms import current_platform
-
+import os
 
 class DefaultModelLoaderV1(BaseModelLoader):
     """ModelLoader that can load registered models"""
@@ -59,7 +59,10 @@ class DefaultModelLoaderV1(BaseModelLoader):
     def load_model(self, fd_config: FDConfig) -> nn.Layer:
         architectures = fd_config.model_config.architectures[0]
         logger.info(f"Starting to load model {architectures}")
-        context = paddle.LazyGuard()
+        #context = paddle.LazyGuard()
+        import contextlib
+
+        context = contextlib.nullcontext()
         if fd_config.load_config.dynamic_load_weight:
             # register rl model
             import fastdeploy.rl  # noqa
@@ -73,8 +76,34 @@ class DefaultModelLoaderV1(BaseModelLoader):
                 model = model_cls(fd_config)
 
         model.eval()
+        # import time
         # RL model not need set_state_dict
         if fd_config.load_config.dynamic_load_weight:
             return model
+        
+        # import paddle.profiler as profiler
+        # with profiler.Profiler(targets=[profiler.ProfilerTarget.CPU, profiler.ProfilerTarget.GPU],
+        #                        scheduler = (0, 1),
+        #       on_trace_ready=profiler.export_chrome_tracing('./log')) as prof:
+        os.environ['FLAGS_use_stride_compute_kernel'] = "1"
         self.load_weights(model, fd_config, enable_cache)
+        os.environ['FLAGS_use_stride_compute_kernel'] = "0"
+        # paddle.base.core.nvprof_start()
+        # paddle.base.core.nvprof_enable_record_event()
+        # paddle.base.core.nvprof_nvtx_push("load_weights")
+        # paddle.base.core.nvprof_nvtx_pop()
+        # paddle.base.core._cuda_synchronize(paddle.CUDAPlace(fd_config.parallel_config.tensor_parallel_rank))
+        # paddle.base.core.nvprof_stop()
+        # time.sleep(120)
+        # for k,v in model.state_dict().items():
+        #     # if k=="ernie.layers.0.self_attn.qkv_proj.weight":
+        #     print(k)
+        #     print(v)
+        # paddle.distributed.communication.group.Group.__deepcopy__ = lambda self, _: self
+        # paddle.distributed.communication.group.Group.to_json = lambda self: repr(self)
+        # if fd_config.parallel_config.tensor_parallel_rank==0:
+        #     paddle.save(model.state_dict(), f"/workspace/FastDeploy/bh_test/old_copy_tp{fd_config.parallel_config.tensor_parallel_rank}.pdparams")
+        # for k,v in model.state_dict().items():
+        #     print("key: ",k)
+        #     print("value: ", v)
         return model

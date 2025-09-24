@@ -33,7 +33,7 @@ from paddleformers.utils.log import logger
 from paddleformers.utils.safetensors import fast_safe_open
 from safetensors import safe_open
 from tqdm import tqdm
-
+from fastdeploy.model_executor.layers.utils import get_tensor
 from fastdeploy import envs
 from fastdeploy.config import FDConfig
 from fastdeploy.model_executor.layers.linear import KVBatchLinear
@@ -310,10 +310,19 @@ def fast_weights_iterator(safe_tensor_list: list[str]):
         safe_tensor_list,
         desc="Loading safetensors checkpoint shards",
     ):
-        with fast_safe_open(st_file, framework="np") as f:
+        with safe_open(st_file, framework="paddle",device="cpu") as f:
             for name in f.keys():
-                param_slice = f.get_slice(name)
-                yield name, param_slice
+                weight = f.get_tensor(name)
+                # weight=get_tensor(weight,to_gpu=True)
+                yield name, weight
+        # with fast_safe_open(st_file, framework="pt") as f:
+        #     for name in f.keys():
+        #         param_slice = f.get_tensor(name)
+        #         import time
+        #         start_time=time.perf_counter()
+        #         tensor=get_tensor(param_slice)
+        #         to_tensor_list.append(time.perf_counter()-start_time)
+        #         yield name, tensor
 
 
 def fastsafetensors_weights_iterator(

@@ -577,6 +577,7 @@ class Ernie4_5_MoeForCausalLM(ModelForCasualLM):
 
         for loaded_weight_name, loaded_weight in weights_iterator:
             loaded_weight_name = loaded_weight_name.replace("model", "ernie")
+            import time
             for param_name, weight_name, exp_id, shard_id, is_moe in all_param_mapping:
                 loaded_weight_name = checkpoint_to_fd_key_fn(loaded_weight_name, is_moe)
                 model_param_name = loaded_weight_name.replace(weight_name, param_name)
@@ -598,11 +599,12 @@ class Ernie4_5_MoeForCausalLM(ModelForCasualLM):
             # Get weight loader from parameter and set weight
             weight_loader = getattr(param, "weight_loader", default_weight_loader(self.fd_config))
             sig = inspect.signature(weight_loader)
+            start=time.perf_counter()
             if "expert_id" in sig.parameters:
                 weight_loader(param, loaded_weight, expert_id=expert_id, shard_id=shard_id)
             else:
                 weight_loader(param, loaded_weight, shard_id)
-
+            print(f"{loaded_weight_name} copy cost {(time.perf_counter()-start)*1000:.2f} ms")
             model_sublayer_name = re.sub(
                 r"\.(up_gate_proj_weight|down_proj_weight|weight|cache_k_scale|cache_v_scale)$", "", model_param_name
             )
