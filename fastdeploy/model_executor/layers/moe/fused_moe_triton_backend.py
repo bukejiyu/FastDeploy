@@ -1470,6 +1470,12 @@ class BlockWiseFP8MoEMethod(QuantMethodBase):
             # weight
             weight_name = self.added_weight_attrs[weight_idx]
             unquantized_weight_name = weight_name.replace("quant_weight", "weight")
+            # if  layer.layer_idx == 1:
+            #     print("in here???")
+            #     if weight_idx==0:
+            #         paddle.save({"bf16_gate_up_weights":getattr(layer, unquantized_weight_name)},"/workspace3/tbh/ckl_fd/bf16_gate_up_weights.pdprams")
+            #     else:
+            #         paddle.save({"bf16_down_weights":getattr(layer, unquantized_weight_name)},"/workspace3/tbh/ckl_fd/bf16_down_weights.pdprams")
             weight_shape = self.up_gate_proj_weight_shape if weight_type == "gate_up" else self.down_proj_weight_shape
             weight_dtype = paddle.float8_e4m3fn
             # scale
@@ -1480,28 +1486,34 @@ class BlockWiseFP8MoEMethod(QuantMethodBase):
 
             # 2.crate tmp tensor
 
-            weight = paddle.empty(shape=weight_shape, dtype=weight_dtype)
+            # weight = paddle.empty(shape=weight_shape, dtype=weight_dtype)
             # scale = paddle.empty(shape=scale_shape, dtype=scale_dtype)
-            scale_list = []
+            b_fp8_list = []
+            b_fp8_scale = []
             # print(f'===============process weight: {weight_name}===============')
             # print(f'weight_shape: {weight.shape}, scale_shape: {scale.shape}')
 
             # 3.quantize weight
-
+            tmp_weight=getattr(layer, unquantized_weight_name).clone()
+            tmp_weight=tmp_weight.transpose([0,2, 1]).contiguous()
             for expert_id in range(layer.num_local_experts):
                 # weight_quant, scale[expert_id] = per_block_cast_to_fp8(
                 #     getattr(layer, unquantized_weight_name)[expert_id], self.quant_config.weight_block_size
                 # )
-                w_q, s_fp32 = quant_weight_ue8m0(
-                    weight_dequant=getattr(layer, unquantized_weight_name)[expert_id].transpose([1, 0]).contiguous(),
-                    weight_block_size=self.quant_config.weight_block_size,
-                )
+                # w_q, s_fp32 = quant_weight_ue8m0(
+                #     weight_dequant=getattr(layer, unquantized_weight_name)[expert_id].transpose([1, 0]).contiguous(),
+                #     weight_block_size=self.quant_config.weight_block_size,
+                # )
 
-                s_ue8m0 = transform_scale_ue8m0(s_fp32, mn=w_q.shape[-2])
-                # print(f'expert_id:{expert_id}, weight_quant:{weight_quant.shape}, scale:{scale[expert_id].shape}')
-                weight[expert_id].copy_(w_q, False)
-                scale_list.append(s_ue8m0)
-            scale = paddle.to_tensor(scale_list)
+                # s_ue8m0 = transform_scale_ue8m0(s_fp32, mn=w_q.shape[-2])
+                # # print(f'expert_id:{expert_id}, weight_quant:{weight_quant.shape}, scale:{scale[expert_id].shape}')
+                # weight[expert_id].copy_(w_q, False)
+                # scale_list.append(s_ue8m0)
+                out, scale = deep_gemm.utils.math.per_block_cast_to_fp8(tmp_weight[expert_id], use_ue8m0=True)
+                b_fp8_list.append(out)
+                b_fp8_scale.append(scale)
+            b_fp8=(paddle.stack(b_fp8_list, dim=0), paddle.stack(b_fp8_scale, dim=0))
+            # scale = paddle.to_tensor(scale_list)
             # print(f'after quant, weight_shape: {weight.shape}, scale_shape: {scale.shape}')
 
             free_tensor(getattr(layer, unquantized_weight_name))
@@ -1537,23 +1549,28 @@ class BlockWiseFP8MoEMethod(QuantMethodBase):
                 layer,
                 weight_name,
                 layer.create_parameter(
-                    shape=weight.shape,
-                    dtype=weight.dtype,
+                    shape=b_fp8[0].shape,
+                    dtype=b_fp8[0].dtype,
                     default_initializer=paddle.nn.initializer.Constant(0),
                 ),
             )
-            getattr(layer, weight_name).copy_(weight, False)
+            # print(f"b_fp8[0] shape",b_fp8[0].shape)
+            # print(f"b_fp8[0] stride",b_fp8[0].stride())
+            getattr(layer, weight_name).copy_(b_fp8[0], False)
             setattr(
                 layer,
                 scale_name,
                 layer.create_parameter(
-                    shape=scale.shape,
-                    dtype=scale.dtype,
+                    shape=b_fp8[1].shape,
+                    dtype=b_fp8[1].dtype,
                     default_initializer=paddle.nn.initializer.Constant(0),
                 ),
             )
-            scale_param = getattr(layer, scale_name)
-            scale_param.data = scale.transpose([0, 2, 1]).contiguous().mT()
+            # print(f"b_fp8[1] shape",b_fp8[1].shape)
+            # print(f"b_fp8[1] stride",b_fp8[1].stride())
+            getattr(layer, scale_name).copy_(b_fp8[1], False)
+            # scale_param = getattr(layer, scale_name)
+            # scale_param.data = scale.transpose([0, 2, 1]).contiguous().mT()
             # scale_param.copy_(scale, False)
 
         if self.quant_config.is_checkpoint_bf16:

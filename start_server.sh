@@ -3,7 +3,7 @@
 export PYTHONPATH=$PWD:$PYTHONPATH
 rm -rf log/*
 
-export CUDA_VISIBLE_DEVICES=2
+export CUDA_VISIBLE_DEVICES=6,7
 # export FD_SAMPLING_CLASS=rejection
 # export PADDLE_COMPATIBLE_API=true
 export FD_USE_DEEP_GEMM=1
@@ -16,6 +16,7 @@ python -m fastdeploy.entrypoints.openai.api_server \
     --graph-optimization-config '{"use_cudagraph":false}' \
     --port 8188 \
     --quantization "block_wise_fp8" \
+    --speculative-config '{"method": "mtp", "num_speculative_tokens": 1, "model": "/workspace3/chenjianye/models/ERNIE-4.5-21B-A3B-Paddle/mtp"}' \ 
     # --num-gpu-blocks-override 5000
 
 # export CUDA_VISIBLE_DEVICES=2,3

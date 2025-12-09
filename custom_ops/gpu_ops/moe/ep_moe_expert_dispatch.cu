@@ -22,6 +22,7 @@
 #include "moe/fused_moe_op.h"
 #pragma GCC diagnostic pop
 
+#include <cstdio>
 #include <cooperative_groups.h>
 #include "helper.h"
 
@@ -798,8 +799,8 @@ __global__ void permute_x_fp8_kernel(
     const float* scale,
     const int64_t* topk_idx,
     const float* topk_weights,
-    const int* token_nums_per_expert,
-    const int* token_nums_per_expert_padded,
+    const int* token_nums_per_expert,//tmp[0]
+    const int* token_nums_per_expert_padded,//tmp[1]
     const int moe_topk,
     const int num_rows,
     const int token_nums_this_rank,
@@ -826,19 +827,24 @@ __global__ void permute_x_fp8_kernel(
     for (int i = 0; i < NUM_EXPERTS_PER_RANK; i++) {
       sum_now += token_nums_per_expert[i];
       sum_now_padded += token_nums_per_expert_padded[i];
-      token_nums_per_expert_cum[i] = sum_now_padded;
+      token_nums_per_expert_cum[i] = sum_now_padded; //[0,128,128,256,....] 总共有专家数个 这是想干嘛呢？
       if (blockIdx.x == 0) {
-        token_nums_per_expert_cumsum[i] = sum_now;
-        token_nums_per_expert_padded_cumsum[i] = sum_now_padded;
+        token_nums_per_expert_cumsum[i] = sum_now; //这里为啥要整cumsum？而且下标是专家id，那不就是 每个专家id知道 之前的专家id-自己的出现的次数和么？
+        token_nums_per_expert_padded_cumsum[i] = sum_now_padded;//为啥padding要sum？ 知道每个专家id之前的专家id到自己的padding数量和
       }
     }
   }
   __syncthreads();
+
   const int hidden_size_int4 = hidden_size / vec_size;
   const int hidden_size_scale = hidden_size / 128;
   const int hidden_size_scale_int4 = hidden_size_scale / scale_vec_size;
-  const int token_nums_feed_to_ffn =
+  //只是为了确定 int4的大小可以读取多少个数据  向量化读取数据 
+  const int token_nums_feed_to_ffn = //所有的专家占住的padding
       token_nums_per_expert_cum[NUM_EXPERTS_PER_RANK - 1];
+  // if (threadIdx.x == 0){
+  //   printf("blockid %d , thread %d, token_nums_feed_to_ffn=%d\n", blockIdx.x,threadIdx.x, token_nums_feed_to_ffn);
+  // }
   // prmt
   for (int64_t s_token_idx = src_token_idx;
        s_token_idx < token_nums_feed_to_ffn;
@@ -857,6 +863,12 @@ __global__ void permute_x_fp8_kernel(
         break;
       }
     }
+    //最终 会得到一个 每一个token 对应的专家id 当然有部分 token 对应的是-1 为啥这样呢？
+    //比如 如果 token_nums_per_expert[0]=1 token_nums_per_expert[1]=0 token_nums_per_expert[2]=2
+    //那么  token_nums_per_expert_padded[0]=128  token_nums_per_expert_padded[1]=0 token_nums_per_expert_padded[2]=128
+    //pading sum token_nums_per_expert_padded[0]=128 token_nums_per_expert_padded[1]=128 token_nums_per_expert_padded[2]=256
+    //m_indices[0]=1 m_indices[1]=-1 .... m_indices[128]=2 m_indices[129] =2 m_indices[130]=-1 
+    //为什么呢？ 这里面的-1代表什么？
 
     if (s_token_idx < num_rows) {
       const int64_t* topk_idx_now = topk_idx + s_token_idx * moe_topk;
@@ -867,7 +879,8 @@ __global__ void permute_x_fp8_kernel(
         const int dst_chunk_start_idx =
             expert_now == 0 ? 0 : token_nums_per_expert_cum[expert_now - 1];
         if (tid == 0) {
-          const int offset_now = atomicAdd(cumsum_idx_gpu + expert_now, 1);
+          const int offset_now = atomicAdd(cumsum_idx_gpu + expert_now, 1); //
+          //？offset_now=0？
           write_idx = offset_now;
         }
         __syncthreads();
@@ -914,15 +927,15 @@ void EPMoeDispatchFP8Kernel(const paddle::Tensor& input,
                             const int token_nums_this_rank_padded,
                             const int hidden_size,
                             const int num_experts_per_rank,
-                            paddle::Tensor* permute_input,
-                            paddle::Tensor* permute_scale,
+                            paddle::Tensor* permute_input,//permute_input！！！
+                            paddle::Tensor* permute_scale,//permute_scale！！！
                             paddle::Tensor* permute_indices_per_token,
                             paddle::Tensor* dst_weights,
                             paddle::Tensor* dst_indices,
                             paddle::Tensor* cumsum_idx_gpu,
                             paddle::Tensor* token_nums_per_expert_cumsum,
                             paddle::Tensor* token_nums_per_expert_padded_cumsum,
-                            paddle::Tensor* m_indices) {
+                            paddle::Tensor* m_indices) {//m_indices！！！
   auto stream = input.stream();
   auto place = input.place();
   // const int gridx = min(132 * 8, num_rows);
@@ -955,14 +968,15 @@ void EPMoeDispatchFP8Kernel(const paddle::Tensor& input,
 }
 
 std::vector<paddle::Tensor> EPMoeExpertDispatchFP8(
-    const paddle::Tensor& input,
-    const paddle::Tensor& scale,
-    const paddle::Tensor& topk_ids,
-    const paddle::Tensor& topk_weights,
-    const paddle::Tensor& num_experts_per_rank_tensor,
-    const paddle::Tensor& num_experts_per_rank_padded_tensor,
-    const bool use_in_ep,
-    const int token_nums_this_rank_padded) {
+    const paddle::Tensor& input, //激活量化好的权重 [token_num, hidden]
+    const paddle::Tensor& scale, // 激活量化好的scale 这个shape不知道
+    const paddle::Tensor& topk_ids, // [token_num,moe_topk]
+    const paddle::Tensor& topk_weights, // [token_num,moe_topk]
+    const paddle::Tensor& num_experts_per_rank_tensor, // [nums_experts] 所有专家的选择情况
+    const paddle::Tensor& num_experts_per_rank_padded_tensor, // [nums_experts] 所有专家padding情况 这个padding是 专家按128对齐情况
+    const bool use_in_ep,//False
+    const int token_nums_this_rank_padded // -1
+    ) {
   const auto input_type = input.dtype();
   const int moe_topk = topk_ids.dims()[1];
   auto place = input.place();
@@ -976,8 +990,9 @@ std::vector<paddle::Tensor> EPMoeExpertDispatchFP8(
   }
 
   const int hidden_size = input.dims()[input_dims.size() - 1];
-  const int num_experts_per_rank = num_experts_per_rank_tensor.dims()[0];
+  const int num_experts_per_rank = num_experts_per_rank_tensor.dims()[0];//
 
+  //？为什么要这样做？
   int32_t token_nums_feed_to_ffn =
       use_in_ep ? token_nums_this_rank_padded
                 : token_rows * moe_topk + num_experts_per_rank * (128 - 1);

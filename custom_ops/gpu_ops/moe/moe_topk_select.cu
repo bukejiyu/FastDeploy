@@ -148,7 +148,7 @@ std::vector<paddle::Tensor> MoETopKSelectKernel(
   auto gating_dims = gating_logits.dims();
   const int expert_num = gating_dims[gating_dims.size() - 1];
 
-  if (gating_dims.size() == 3) {
+  if (gating_dims.size() == 3) {//还有等于3的情况么？
     token_rows = gating_dims[0] * gating_dims[1];
   } else {
     token_rows = gating_dims[0];
@@ -174,22 +174,27 @@ std::vector<paddle::Tensor> MoETopKSelectKernel(
   sorter_.update_num_experts(expert_num);
 
   const int sorter_ws_size_bytes =
-      AlignTo16(sorter_.getWorkspaceSize(moe_topk * num_rows));
+      AlignTo16(sorter_.getWorkspaceSize(moe_topk * num_rows)); //这个东西时干啥的？
   const int sort_tmp_in_out_size = num_moe_inputs * 2 * sizeof(int);
 
-  paddle::Tensor ws_ptr_tensor =
+  paddle::Tensor ws_ptr_tensor = //
       GetEmptyTensor({bytes + sorter_ws_size_bytes + sort_tmp_in_out_size},
                      paddle::DataType::INT8,
                      place);
 
-  int8_t* ws_ptr = ws_ptr_tensor.data<int8_t>();
-  int* source_rows_ = reinterpret_cast<int*>(ws_ptr);
+  int8_t* ws_ptr = ws_ptr_tensor.data<int8_t>(); //这个东西时干啥的？
+  int* source_rows_ = reinterpret_cast<int*>(ws_ptr);//
 
   int64_t* topk_ids_data = topk_ids.data<int64_t>();
 
   float* softmax_max_prob = nullptr;
   float* softmax_out_;
 
+  //判断是否为2的幂
+  // expert_num   =  1000
+  // expert_num-1 =  0111
+  //                 0000
+  //所以expert_num 是2的幂
   const bool is_pow_2 =
       (expert_num != 0) && ((expert_num & (expert_num - 1)) == 0);
 
@@ -206,16 +211,17 @@ std::vector<paddle::Tensor> MoETopKSelectKernel(
   moe_topk_select_kernel<float>(gating_logits.data<float>(),
                                 bias ? bias.get().data<float>() : nullptr,
                                 topk_weights.data<float>(),
-                                softmax_out_,
-                                topk_ids_data,
-                                source_rows_,
-                                softmax_max_prob,
-                                num_rows,
-                                expert_num,
-                                moe_topk,
+                                softmax_out_,//null
+                                topk_ids_data,// 返回
+                                source_rows_,//cub的排序需要的空间么？不知道干啥用的
+                                softmax_max_prob,//null
+                                num_rows,//token_num
+                                expert_num,//
+                                moe_topk,//6我需要最大的专家
                                 stream,
-                                apply_norm_weight,
-                                enable_softmax_top_k_fused);
+                                apply_norm_weight,//这是是否在跑过norm? True
+                                enable_softmax_top_k_fused//False
+                                );
   return {topk_ids, topk_weights};
 }
 
