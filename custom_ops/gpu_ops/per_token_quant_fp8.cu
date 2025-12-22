@@ -13,6 +13,9 @@
 // limitations under the License.
 
 #include "helper.h"
+#include <cmath>
+#include <cstdio>
+
 
 constexpr float epsilon = 1e-10;
 
@@ -150,11 +153,12 @@ std::vector<paddle::Tensor> PerTokenQuant(paddle::Tensor &input,
   return {quanted_x, quanted_scale};
 }
 
-template <typename T>
+template <typename T, bool SCALE_UE8M0 = false,
+          typename scaleType = std::conditional_t<SCALE_UE8M0, uint32_t, float>>
 __global__ void quant_per_token_per_block_padding(
     const T *input,
     phi::dtype::float8_e4m3fn *quanted_res,
-    float *quanted_scale,
+    scaleType* __restrict__ quanted_scale,
     const int token_num,
     const int padded_token_num,
     const int hidden_size,
@@ -162,23 +166,35 @@ __global__ void quant_per_token_per_block_padding(
     const bool use_finegrained_range) {
   const int bid = blockIdx.x;
   const int tid = threadIdx.x;
-  const int warp_id = tid / 32;
+  //这个kernel我们写的是 32个线程处理一个group
+  const int warp_id = tid / 32; //20个group
   const int lane_id = tid % 32;
   const int num_warp = blockDim.x / 32;
-  static constexpr int NUM_PER_THREADS = 128 / 32;  // 4
+  static constexpr int NUM_PER_THREADS = 128 / 32;  // 4 所以每个线程处理 4个 输入
   static constexpr float MAX_VALUE = 448.f;
   const int end_iter = hidden_size / 128;  // warp_iter_num
   AlignedVector<T, NUM_PER_THREADS> load_vec;
   AlignedVector<float, NUM_PER_THREADS> load_vec_float;
   AlignedVector<phi::dtype::float8_e4m3fn, NUM_PER_THREADS> res_vec;
+  using scale_element_t = std::conditional_t<SCALE_UE8M0, uint8_t, float>;
   for (int token_idx = bid; token_idx < token_num; token_idx += gridDim.x) {
     const T *input_now = input + token_idx * hidden_size;
     phi::dtype::float8_e4m3fn *quanted_res_now =
         quanted_res + token_idx * hidden_size;
     // deal a block per warp
-    for (int iter = warp_id; iter < end_iter; iter += num_warp) {
-      float *quanted_scale_now =
-          quanted_scale + iter * padded_token_num + token_idx;
+    //我现在在处理第几个group， 当前block 总共需要处理多少个group
+    for (int iter = warp_id; iter < end_iter; iter += num_warp) { //很多个线程都在处理同一个 group 也就是 col_id 我是32个线程处理一个group
+      int scale_col=iter;
+      scale_element_t *quanted_scale_now;
+      if constexpr(SCALE_UE8M0) {
+        const int num_elems_per_pack = static_cast<int>(sizeof(scaleType) / sizeof(scale_element_t));
+        const int col_idx = scale_col/num_elems_per_pack; //现在在处理第几个group  4个 都在一个group内
+        const int pack_idx = scale_col % num_elems_per_pack; //也就是多个线程会拿到同一个 offset //32个线程拿到的是同一个 偏移 
+        quanted_scale_now = reinterpret_cast<scale_element_t*>(quanted_scale)+(pack_idx +col_idx * padded_token_num*num_elems_per_pack + token_idx*num_elems_per_pack); 
+      }else{
+        quanted_scale_now = quanted_scale+scale_col * padded_token_num + token_idx;  
+      }
+      
       const int start_offset = iter * 128;
       Load<T, NUM_PER_THREADS>(
           input_now + start_offset + lane_id * NUM_PER_THREADS, &load_vec);
@@ -209,24 +225,72 @@ __global__ void quant_per_token_per_block_padding(
       }
 
       float scale_to_store = max_value_thread / MAX_VALUE;
+      if constexpr(SCALE_UE8M0) {
+        scale_to_store = exp2f(ceilf(log2f(scale_to_store)));
+      }
+
+
+      scale_element_t y_s_quant;
+      if constexpr(SCALE_UE8M0) {
+         y_s_quant = (uint8_t)(((int)log2f(scale_to_store)) + 127);
+      }else {
+         y_s_quant = scale_to_store;
+      }
+
+      // //输出group等于0的 4个值 
+      // if ((iter == 16||iter==17||iter==18||iter==19) && lane_id==0 && token_idx == 0 ) {
+      //     printf(
+      //       "group_id=%d group_offset=%d y_s_quant=%u,quanted_scale_now=%p \n",
+      //       iter, iter%4, y_s_quant,(void*)quanted_scale_now
+      //     );
+      // }
+
       // quant
 #pragma unroll
       for (int vid = 0; vid < NUM_PER_THREADS; vid++) {
         res_vec[vid] = static_cast<phi::dtype::float8_e4m3fn>(
-            load_vec_float[vid] * MAX_VALUE / max_value_thread);
+            fminf(fmaxf(load_vec_float[vid] /scale_to_store,-448.f),MAX_VALUE));
       }
       // store
       Store<phi::dtype::float8_e4m3fn, NUM_PER_THREADS>(
           res_vec, quanted_res_now + start_offset + lane_id * NUM_PER_THREADS);
+      // if constexpr(SCALE_UE8M0) {
+      //   if (lane_id == 0 || lane_id == 1 || lane_id == 2 || lane_id == 3){
+      //     *quanted_scale_now = y_s_quant;
+      //   }
+      // }else{
       if (lane_id == 0) {
-        *quanted_scale_now = scale_to_store;
+        *quanted_scale_now = y_s_quant;
+      }
+      // }
       }
     }
+}
+template <typename T>
+void dispatc_quant_per_token_per_block_padding(
+  const T *input,
+  phi::dtype::float8_e4m3fn *quanted_res,
+  paddle::Tensor &quanted_scale_tensor,
+  const int token_num,
+  const int padded_token_num,
+  const int hidden_size,
+  const int hidden_size_scale,
+  const bool use_finegrained_range,
+  const bool use_ue8m0,
+  paddle::Tensor &input_tensor){
+  const int gridx = min(132 * 8, token_num);
+  const int blockx = min(1024, hidden_size / 128 * 32);
+  if (use_ue8m0){
+    quant_per_token_per_block_padding<T,true><<<gridx, blockx, 0, input_tensor.stream()>>>(input,quanted_res,static_cast<uint32_t*>(quanted_scale_tensor.data()),token_num,padded_token_num,hidden_size,hidden_size_scale,use_finegrained_range);
+  }else{
+    quant_per_token_per_block_padding<T,false><<<gridx, blockx, 0, input_tensor.stream()>>>(input,quanted_res,quanted_scale_tensor.data<float>(),token_num,padded_token_num,hidden_size,hidden_size_scale,use_finegrained_range);
   }
 }
 
+
 std::vector<paddle::Tensor> PerTokenQuantPadding(paddle::Tensor &input,
-                                                 const int block_size) {
+                                                 const int block_size,
+                                                 const bool use_ue8m0) {
   using ScaleDtype = float;
 
   auto input_dim = input.dims();
@@ -237,7 +301,7 @@ std::vector<paddle::Tensor> PerTokenQuantPadding(paddle::Tensor &input,
   PADDLE_ENFORCE(hidden_size % 128 == 0,
                  "hidden_size must be divisible by 128");
 
-  const int hidden_size_scale = hidden_size / block_size;
+  int hidden_size_scale = hidden_size / block_size;
   auto quanted_x = GetEmptyTensor(
       {token_num, hidden_size}, paddle::DataType::FLOAT8_E4M3FN, input.place());
 
@@ -246,12 +310,19 @@ std::vector<paddle::Tensor> PerTokenQuantPadding(paddle::Tensor &input,
   const int padded_token_num =
       ((token_num + tma_alignment_elements - 1) / tma_alignment_elements) *
       tma_alignment_elements;
+  if (use_ue8m0){
+    hidden_size_scale = (((hidden_size_scale + tma_alignment_elements - 1) / tma_alignment_elements) *
+      tma_alignment_elements)/4;
+  }
+  paddle::DataType scale_packed_dtype =use_ue8m0 ? paddle::DataType::INT32: paddle::DataType::FLOAT32;
+  
   auto quanted_scale = GetEmptyTensor({padded_token_num, hidden_size_scale},
-                                      {1, padded_token_num},
-                                      paddle::DataType::FLOAT32,
-                                      input.place());
-  const int gridx = min(132 * 8, token_num);
-  const int blockx = min(1024, hidden_size / 128 * 32);
+                                    {1, padded_token_num},
+                                    scale_packed_dtype,
+                                    input.place());
+  
+  // const int gridx = min(132 * 8, token_num);
+  // const int blockx = min(1024, hidden_size / 128 * 32);
 
   bool use_finegrained_range = false;
   char *env_var = getenv("PER_TOKEN_QUANT_FP8_USE_FINEGRAINED_RANGE");
@@ -261,26 +332,30 @@ std::vector<paddle::Tensor> PerTokenQuantPadding(paddle::Tensor &input,
 
   switch (input.dtype()) {
     case paddle::DataType::BFLOAT16:
-      quant_per_token_per_block_padding<<<gridx, blockx, 0, input.stream()>>>(
+      dispatc_quant_per_token_per_block_padding(
           input.data<paddle::bfloat16>(),
           quanted_x.data<phi::dtype::float8_e4m3fn>(),
-          quanted_scale.data<ScaleDtype>(),
+          quanted_scale,
           token_num,
           padded_token_num,
           hidden_size,
           hidden_size_scale,
-          use_finegrained_range);
+          use_finegrained_range,
+          use_ue8m0,
+          input);
       break;
     case paddle::DataType::FLOAT16:
-      quant_per_token_per_block_padding<<<gridx, blockx, 0, input.stream()>>>(
+      dispatc_quant_per_token_per_block_padding(
           input.data<paddle::float16>(),
           quanted_x.data<phi::dtype::float8_e4m3fn>(),
-          quanted_scale.data<ScaleDtype>(),
+          quanted_scale,
           token_num,
           padded_token_num,
           hidden_size,
           hidden_size_scale,
-          use_finegrained_range);
+          use_finegrained_range,
+          use_ue8m0,
+          input);
       break;
     default:
       PD_THROW("Unsupported data type for PerTokenQuant");
@@ -289,25 +364,33 @@ std::vector<paddle::Tensor> PerTokenQuantPadding(paddle::Tensor &input,
 }
 
 std::vector<std::vector<int64_t>> PerTokenQuantPaddingInferShape(
-    std::vector<int64_t> input_shape, const int block_size) {
+    std::vector<int64_t> input_shape, const int block_size,const bool use_ue8m0) {
   using ScaleDtype = float;
 
   const int token_num = input_shape[0];
   const int hidden_size = input_shape[1];
-  const int hidden_size_scale = hidden_size / block_size;
+  int hidden_size_scale = hidden_size / block_size;
 
   const int tma_alignment_bytes = 16;
   const int tma_alignment_elements = tma_alignment_bytes / sizeof(ScaleDtype);
   const int padded_token_num =
       ((token_num + tma_alignment_elements - 1) / tma_alignment_elements) *
       tma_alignment_elements;
+  if (use_ue8m0){
+    hidden_size_scale = (((hidden_size_scale + tma_alignment_elements - 1) / tma_alignment_elements) *
+      tma_alignment_elements)/4;
+  }
 
   return {{token_num, hidden_size}, {padded_token_num, hidden_size_scale}};
 }
 
 std::vector<paddle::DataType> PerTokenQuantPaddingInferDtype(
-    paddle::DataType input_dtype) {
-  return {paddle::DataType::FLOAT8_E4M3FN, paddle::DataType::FLOAT32};
+    paddle::DataType input_dtype, const int block_size,const bool use_ue8m0) {
+  if (use_ue8m0){
+    return {paddle::DataType::FLOAT8_E4M3FN, paddle::DataType::INT32};
+  }else{
+    return {paddle::DataType::FLOAT8_E4M3FN, paddle::DataType::FLOAT32};
+  }
 }
 
 template <typename T>
@@ -468,7 +551,7 @@ PD_BUILD_STATIC_OP(per_token_quant)
 PD_BUILD_STATIC_OP(per_token_quant_padding)
     .Inputs({"input"})
     .Outputs({"output", "output_scale"})
-    .Attrs({"block_size: int"})
+    .Attrs({"block_size: int","use_ue8m0: bool"})
     .SetKernelFn(PD_KERNEL(PerTokenQuantPadding))
     .SetInferShapeFn(PD_INFER_SHAPE(PerTokenQuantPaddingInferShape))
     .SetInferDtypeFn(PD_INFER_DTYPE(PerTokenQuantPaddingInferDtype));
