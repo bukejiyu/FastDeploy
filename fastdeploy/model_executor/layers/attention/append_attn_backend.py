@@ -60,6 +60,7 @@ class AppendAttentionMetadata(AttentionMetadata):
     # pd_disaggregation
     kv_signal_metadata: Optional[paddle.Tensor] = None
     kv_signal_data_list: List[Optional[paddle.Tensor]] = field(default_factory=list)
+    enable_ids_reorder: bool = True
 
 
 def allocate_launch_related_buffer(
@@ -181,6 +182,9 @@ class AppendAttentionBackend(AttentionBackend):
             metadata._fuse_kernel_compute_dtype = "fp16"
         elif metadata._dtype == "float32":
             metadata._fuse_kernel_compute_dtype = "fp32"
+        metadata.num_prfill = forward_meta
+        from fastdeploy.model_executor.layers.attention.utils import split_decodes_and_prefills
+        metadata.num_decodes, metadata.num_prefills, metadata.num_decode_tokens, metadata.num_prefill_tokens = split_decodes_and_prefills(forward_meta)
 
         # pd_disaggregation
         metadata.kv_signal_data_list = [None] * self.num_layers
@@ -262,175 +266,269 @@ class AppendAttentionBackend(AttentionBackend):
             cache_k_scales = getattr(layer, "cache_k_scale", None)
             cache_v_scales = getattr(layer, "cache_v_scale", None)
 
+        num_decodes = metadata.num_decodes
+        num_prefills = metadata.num_prefills
+        num_decode_tokens = metadata.num_decode_tokens
+        num_prefill_tokens = metadata.num_prefill_tokens
+        # print(qkv.shape)
+        shape = [qkv.shape[0],self.num_heads*self.head_dim]
+        output = paddle.empty(shape, dtype=qkv.dtype)
         if layer.layer_id == 0:
+            print("切片前")
+            print("qkv:",qkv)
+            print("qkv shape:",qkv.shape)
+            print("forward_meta.cu_seqlens_q:",forward_meta.cu_seqlens_q)
+            print("forward_meta.seq_lens_encoder:",forward_meta.seq_lens_encoder)
+            print("forward_meta.seq_lens_decoder:",forward_meta.seq_lens_decoder)
+            print("forward_meta.block_tables:",forward_meta.block_tables)
+            # print("num_decode_tokens:",num_decode_tokens)
+            # print("num_decodes:",num_decodes)
+            # print("num_decode_tokens:",num_decode_tokens)
+            print("seq_len_this_time:",forward_meta.seq_lens_this_time)
+            print(f"num_req_decodes:{num_decodes} , num_req_prefills:{num_prefills}, num_decode_tokens:{num_decode_tokens}, num_prefill_tokens:{num_prefill_tokens}")
+
+        def _test(qkv,seq_lens_this_time,cu_seqlens_q,seq_lens_encoder,seq_lens_decoder,batch_id_per_token):        
+            if layer.layer_id == 0:
+                print('qkv.shape:',qkv.shape)
+                print("qkv",qkv)
+                print("seq_lens_this_time:",seq_lens_this_time)
+                print("cu_seqlens_q:",cu_seqlens_q)
+                print("seq_lens_encoder:",seq_lens_encoder)
+                print("seq_lens_decoder:",seq_lens_decoder)
+                print("batch_id_per_token:",batch_id_per_token)
+                
+
+            # if layer.layer_id == 0:
             # print(forward_meta.seq_lens_this_time)
+            decoder_batch_ids=paddle.full(forward_meta.decoder_batch_ids.shape, 0, dtype="int32")
+            decoder_tile_ids_per_batch=paddle.full(forward_meta.decoder_tile_ids_per_batch.shape, 0, dtype="int32") 
+            decoder_num_blocks_cpu= paddle.full(forward_meta.decoder_num_blocks_cpu.shape, 0, dtype="int32").pin_memory()
+            decoder_num_blocks_device=paddle.full([1], 0, dtype="int32")
+            decoder_chunk_size_device=paddle.full([1], 64, dtype="int32")
+            max_len_tensor_cpu=paddle.full(forward_meta.max_len_tensor_cpu.shape, 0, dtype="int32").cpu()
+            encoder_batch_ids=paddle.full(forward_meta.encoder_batch_ids.shape, 0, dtype="int32")
+            encoder_tile_ids_per_batch=paddle.full(forward_meta.encoder_tile_ids_per_batch.shape, 0, dtype="int32")
+            encoder_num_blocks_x_cpu=paddle.full(forward_meta.encoder_num_blocks_x_cpu.shape, 0, dtype="int32").cpu()
+            kv_batch_ids=paddle.full(forward_meta.kv_batch_ids.shape, 0, dtype="int32")
+            kv_tile_ids_per_batch=paddle.full(forward_meta.kv_tile_ids_per_batch.shape, 0, dtype="int32")
+            kv_num_blocks_x_cpu=paddle.full([1], 0, dtype="int32").cpu()
             get_block_shape_and_split_kv_block(
-                forward_meta.seq_lens_encoder,
-                forward_meta.seq_lens_decoder,
-                forward_meta.seq_lens_this_time,
-                forward_meta.decoder_batch_ids,
-                forward_meta.decoder_tile_ids_per_batch,
-                forward_meta.decoder_num_blocks_cpu,
-                forward_meta.decoder_num_blocks_device,
-                forward_meta.decoder_chunk_size_device,
-                forward_meta.max_len_tensor_cpu,
-                forward_meta.encoder_batch_ids,
-                forward_meta.encoder_tile_ids_per_batch,
-                forward_meta.encoder_num_blocks_x_cpu,
-                forward_meta.kv_batch_ids,
-                forward_meta.kv_tile_ids_per_batch,
-                forward_meta.kv_num_blocks_x_cpu,
+                seq_lens_encoder,
+                seq_lens_decoder,
+                seq_lens_this_time,
+                decoder_batch_ids,
+                decoder_tile_ids_per_batch,
+                decoder_num_blocks_cpu,
+                decoder_num_blocks_device,
+                decoder_chunk_size_device,
+                max_len_tensor_cpu,
+                encoder_batch_ids,
+                encoder_tile_ids_per_batch,
+                encoder_num_blocks_x_cpu,
+                kv_batch_ids,
+                kv_tile_ids_per_batch,
+                kv_num_blocks_x_cpu,
                 self.encoder_block_shape_q,
                 self.decoder_block_shape_q,
                 self.group_size,
                 self.block_size,
             )
-
-        if self.use_output:
-            quant_max_bound = getattr(layer, "quant_max_bound", 0.0)
-            cache_quant_type = getattr(layer, "cache_quant_type_str", "none")
-            compute_type = metadata._fuse_kernel_compute_dtype
-            out_scale = getattr(layer, "out_scale", -1.0)
-            # 1. get output datatype
-            qkv_dtype = qkv.dtype
-            if qkv_dtype == paddle.float16:
-                D_type = paddle.float16
-            elif qkv_dtype == paddle.bfloat16:
-                D_type = paddle.bfloat16
-            elif qkv_dtype == paddle.int32:
-                if compute_type == "bf16":
-                    D_type = paddle.bfloat16
-                elif compute_type == "fp16":
+            
+            if self.use_output:
+                quant_max_bound = getattr(layer, "quant_max_bound", 0.0)
+                cache_quant_type = getattr(layer, "cache_quant_type_str", "none")
+                compute_type = metadata._fuse_kernel_compute_dtype
+                out_scale = getattr(layer, "out_scale", -1.0)
+                # 1. get output datatype
+                qkv_dtype = qkv.dtype
+                if qkv_dtype == paddle.float16:
                     D_type = paddle.float16
+                elif qkv_dtype == paddle.bfloat16:
+                    D_type = paddle.bfloat16
+                elif qkv_dtype == paddle.int32:
+                    if compute_type == "bf16":
+                        D_type = paddle.bfloat16
+                    elif compute_type == "fp16":
+                        D_type = paddle.float16
+                    else:
+                        raise NotImplementedError("Only supported attr of qkv_type in ['float16', 'bfloat16'].")
                 else:
-                    raise NotImplementedError("Only supported attr of qkv_type in ['float16', 'bfloat16'].")
-            else:
-                raise NotImplementedError("Only supported attr of qkv_type in ['float16', 'bfloat16', 'int32'].")
-            # 2.Extract related parameters
-            token_nums = qkv.shape[0]
-            head_dims = self.head_dim if cache_quant_type != "cache_int4_zp" else self.head_dim * 2
-            q_num_heads = self.num_heads
-            # 3. generate output tensor of different dtypes
-            if out_scale > 0.0:
-                if abs(quant_max_bound - 127) < 0.000001:
-                    res = paddle.empty([token_nums, q_num_heads * head_dims], dtype="int8")
-                elif abs(quant_max_bound - 448) < 0.000001:
-                    res = paddle.empty([token_nums, q_num_heads * head_dims], dtype="float8_e4m3fn")
+                    raise NotImplementedError("Only supported attr of qkv_type in ['float16', 'bfloat16', 'int32'].")
+                # 2.Extract related parameters
+                token_nums = qkv.shape[0]
+                head_dims = self.head_dim if cache_quant_type != "cache_int4_zp" else self.head_dim * 2
+                q_num_heads = self.num_heads
+                # 3. generate output tensor of different dtypes
+                if out_scale > 0.0:
+                    if abs(quant_max_bound - 127) < 0.000001:
+                        res = paddle.empty([token_nums, q_num_heads * head_dims], dtype="int8")
+                    elif abs(quant_max_bound - 448) < 0.000001:
+                        res = paddle.empty([token_nums, q_num_heads * head_dims], dtype="float8_e4m3fn")
+                    else:
+                        raise NotImplementedError("Only supported attr of quant_max_bound in ['127', '448'].")
                 else:
-                    raise NotImplementedError("Only supported attr of quant_max_bound in ['127', '448'].")
-            else:
-                res = paddle.empty([token_nums, q_num_heads * head_dims], dtype=D_type)
+                    res = paddle.empty([token_nums, q_num_heads * head_dims], dtype=D_type)
 
-            res = append_attention_with_output(
-                qkv,
-                cache_k,
-                cache_v,
-                forward_meta.seq_lens_encoder,
-                forward_meta.seq_lens_decoder,
-                forward_meta.seq_lens_this_time,
-                forward_meta.batch_id_per_token,
-                forward_meta.cu_seqlens_q,
-                forward_meta.block_tables,
-                forward_meta.encoder_batch_ids,
-                forward_meta.encoder_tile_ids_per_batch,
-                forward_meta.encoder_num_blocks_x_cpu,
-                forward_meta.kv_batch_ids,
-                forward_meta.kv_tile_ids_per_batch,
-                forward_meta.kv_num_blocks_x_cpu,
-                forward_meta.decoder_batch_ids,
-                forward_meta.decoder_tile_ids_per_batch,
-                forward_meta.decoder_num_blocks_cpu,
-                forward_meta.max_len_tensor_cpu,
-                res,
-                forward_meta.rotary_embs,
-                forward_meta.attn_mask,
-                layer.qkv_bias,
-                layer.qkv_scale,
-                cache_k_scales,
-                cache_v_scales,
-                getattr(layer, "cache_k_out_scale", None),
-                getattr(layer, "cache_v_out_scale", None),
-                getattr(layer, "cache_k_zp", None),
-                getattr(layer, "cache_v_zp", None),
-                layer.linear_shift,
-                layer.linear_smooth,
-                forward_meta.attn_mask_offsets,
-                metadata.kv_signal_data_list[layer.layer_id],
-                getattr(layer, "q_norm_weight", None),
-                getattr(layer, "k_norm_weight", None),
-                getattr(layer, "sinks", None),
-                getattr(layer, "rms_norm_eps", 1e-6),
-                metadata._fuse_kernel_compute_dtype,
-                getattr(layer, "cache_quant_type_str", "none"),
-                layer.use_neox_rotary_style,
-                self.rope_3d,
-                self.max_seq_len,
-                getattr(layer, "quant_max_bound", 0.0),
-                getattr(layer, "quant_min_bound", 0.0),
-                getattr(layer, "out_scale", -1.0),
-                self.encoder_block_shape_q,
-                self.decoder_block_shape_q,
-                metadata.max_partition_size,
-                metadata.encoder_max_partition_size,
-                self.speculate_max_draft_token_num + 1,
-                self.causal,
-                self.speculative_method is not None,
-                sliding_window,
-            )
-        else:
-            res = append_attention(
-                qkv,
-                cache_k,
-                cache_v,
-                forward_meta.seq_lens_encoder,
-                forward_meta.seq_lens_decoder,
-                forward_meta.seq_lens_this_time,
-                forward_meta.batch_id_per_token,
-                forward_meta.cu_seqlens_q,
-                forward_meta.block_tables,
-                forward_meta.encoder_batch_ids,
-                forward_meta.encoder_tile_ids_per_batch,
-                forward_meta.encoder_num_blocks_x_cpu,
-                forward_meta.kv_batch_ids,
-                forward_meta.kv_tile_ids_per_batch,
-                forward_meta.kv_num_blocks_x_cpu,
-                forward_meta.decoder_batch_ids,
-                forward_meta.decoder_tile_ids_per_batch,
-                forward_meta.decoder_num_blocks_cpu,
-                forward_meta.max_len_tensor_cpu,
-                forward_meta.rotary_embs,
-                forward_meta.attn_mask,
-                layer.qkv_bias,
-                layer.qkv_scale,
-                cache_k_scales,
-                cache_v_scales,
-                getattr(layer, "cache_k_out_scale", None),
-                getattr(layer, "cache_v_out_scale", None),
-                getattr(layer, "cache_k_zp", None),
-                getattr(layer, "cache_v_zp", None),
-                layer.linear_shift,
-                layer.linear_smooth,
-                forward_meta.attn_mask_offsets,
-                metadata.kv_signal_data_list[layer.layer_id],
-                getattr(layer, "q_norm_weight", None),
-                getattr(layer, "k_norm_weight", None),
-                getattr(layer, "sinks", None),
-                getattr(layer, "rms_norm_eps", 1e-6),
-                metadata._fuse_kernel_compute_dtype,
-                getattr(layer, "cache_quant_type_str", "none"),
-                layer.use_neox_rotary_style,
-                self.rope_3d,
-                self.max_seq_len,
-                getattr(layer, "quant_max_bound", 0.0),
-                getattr(layer, "quant_min_bound", 0.0),
-                getattr(layer, "out_scale", -1.0),
-                self.encoder_block_shape_q,
-                self.decoder_block_shape_q,
-                metadata.max_partition_size,
-                metadata.encoder_max_partition_size,
-                self.speculate_max_draft_token_num + 1,
-                self.causal,
-                self.speculative_method is not None,
-                sliding_window,
-            )
-        return res
+                res = append_attention_with_output(
+                    qkv,
+                    cache_k,
+                    cache_v,
+                    seq_lens_encoder,
+                    seq_lens_decoder,
+                    seq_lens_this_time,
+                    batch_id_per_token,
+                    cu_seqlens_q,
+                    forward_meta.block_tables,
+                    encoder_batch_ids,
+                    encoder_tile_ids_per_batch,
+                    encoder_num_blocks_x_cpu,
+                    kv_batch_ids,
+                    kv_tile_ids_per_batch,
+                    kv_num_blocks_x_cpu,
+                    decoder_batch_ids,
+                    decoder_tile_ids_per_batch,
+                    decoder_num_blocks_cpu,
+                    max_len_tensor_cpu,
+                    res,
+                    forward_meta.rotary_embs,
+                    forward_meta.attn_mask,
+                    layer.qkv_bias,
+                    layer.qkv_scale,
+                    cache_k_scales,
+                    cache_v_scales,
+                    getattr(layer, "cache_k_out_scale", None),
+                    getattr(layer, "cache_v_out_scale", None),
+                    getattr(layer, "cache_k_zp", None),
+                    getattr(layer, "cache_v_zp", None),
+                    layer.linear_shift,
+                    layer.linear_smooth,
+                    forward_meta.attn_mask_offsets,
+                    metadata.kv_signal_data_list[layer.layer_id],
+                    getattr(layer, "q_norm_weight", None),
+                    getattr(layer, "k_norm_weight", None),
+                    getattr(layer, "sinks", None),
+                    getattr(layer, "rms_norm_eps", 1e-6),
+                    metadata._fuse_kernel_compute_dtype,
+                    getattr(layer, "cache_quant_type_str", "none"),
+                    layer.use_neox_rotary_style,
+                    self.rope_3d,
+                    self.max_seq_len,
+                    getattr(layer, "quant_max_bound", 0.0),
+                    getattr(layer, "quant_min_bound", 0.0),
+                    getattr(layer, "out_scale", -1.0),
+                    self.encoder_block_shape_q,
+                    self.decoder_block_shape_q,
+                    metadata.max_partition_size,
+                    metadata.encoder_max_partition_size,
+                    self.speculate_max_draft_token_num + 1,
+                    self.causal,
+                    self.speculative_method is not None,
+                    sliding_window,
+                )
+            else:
+                res = append_attention(
+                    qkv,
+                    cache_k,
+                    cache_v,
+                    seq_lens_encoder,
+                    seq_lens_decoder,
+                    seq_lens_this_time,
+                    batch_id_per_token,
+                    cu_seqlens_q,
+                    forward_meta.block_tables,
+                    encoder_batch_ids,
+                    encoder_tile_ids_per_batch,
+                    encoder_num_blocks_x_cpu,
+                    kv_batch_ids,
+                    kv_tile_ids_per_batch,
+                    kv_num_blocks_x_cpu,
+                    decoder_batch_ids,
+                    decoder_tile_ids_per_batch,
+                    decoder_num_blocks_cpu,
+                    max_len_tensor_cpu,
+                    forward_meta.rotary_embs,
+                    forward_meta.attn_mask,
+                    layer.qkv_bias,
+                    layer.qkv_scale,
+                    cache_k_scales,
+                    cache_v_scales,
+                    getattr(layer, "cache_k_out_scale", None),
+                    getattr(layer, "cache_v_out_scale", None),
+                    getattr(layer, "cache_k_zp", None),
+                    getattr(layer, "cache_v_zp", None),
+                    layer.linear_shift,
+                    layer.linear_smooth,
+                    forward_meta.attn_mask_offsets,
+                    metadata.kv_signal_data_list[layer.layer_id],
+                    getattr(layer, "q_norm_weight", None),
+                    getattr(layer, "k_norm_weight", None),
+                    getattr(layer, "sinks", None),
+                    getattr(layer, "rms_norm_eps", 1e-6),
+                    metadata._fuse_kernel_compute_dtype,
+                    getattr(layer, "cache_quant_type_str", "none"),
+                    layer.use_neox_rotary_style,
+                    self.rope_3d,
+                    self.max_seq_len,
+                    getattr(layer, "quant_max_bound", 0.0),
+                    getattr(layer, "quant_min_bound", 0.0),
+                    getattr(layer, "out_scale", -1.0),
+                    self.encoder_block_shape_q,
+                    self.decoder_block_shape_q,
+                    metadata.max_partition_size,
+                    metadata.encoder_max_partition_size,
+                    self.speculate_max_draft_token_num + 1,
+                    self.causal,
+                    self.speculative_method is not None,
+                    sliding_window,
+                )
+            return res
+        import paddle.nn.functional as F
+
+        #
+        # pad_row = paddle.zeros([1, 1], dtype='float32')
+
+        # # 沿行方向拼接
+        # seq_lens_padded = paddle.concat([seq_lens_encoder, pad_row], axis=0)
+
+        # print(seq_lens_padded.shape)  # [256, 1]
+        if num_prefill_tokens>0:
+            if layer.layer_id == 0:
+                print("==========doing prefill attention==========")
+            batch_id_per_token=forward_meta.batch_id_per_token[num_decode_tokens:].clone()
+            batch_id_per_token=batch_id_per_token
+            seq_lens_encoder=forward_meta.seq_lens_encoder.clone()
+            seq_lens_encoder[:num_decodes]=0
+            seq_lens_this_time=forward_meta.seq_lens_this_time.clone()
+            seq_lens_this_time[:num_decodes]=0
+            cu_seqlens_q = forward_meta.cu_seqlens_q.clone()
+            cu_seqlens_q[:num_decodes]=0
+            cu_seqlens_q[num_decodes:]=cu_seqlens_q[num_decodes:]-num_decode_tokens
+            out0=_test(qkv[num_decode_tokens:],seq_lens_this_time,cu_seqlens_q,seq_lens_encoder,paddle.zeros([256,1],dtype="int32"),batch_id_per_token)
+            if layer.layer_id == 0:
+                print("prefill attention output shape:", out0.shape)
+                print("prefill attention output:", out0)
+            output[num_decode_tokens:,:]=out0
+        if num_decode_tokens>0:
+            if layer.layer_id == 0:
+                print("==========doing decoder attention==========")
+            # pad=forward_meta.seq_lens_encoder.shape[0]-num_decode_tokens
+            # pad_row = paddle.zeros([pad, 1], dtype="int32")
+            batch_id_per_token=forward_meta.batch_id_per_token[:num_decode_tokens].clone()
+            batch_id_per_token=batch_id_per_token
+            seq_lens_decoder = forward_meta.seq_lens_decoder.clone()
+            seq_lens_decoder[num_decodes:] = 0
+            seq_lens_this_time = forward_meta.seq_lens_this_time.clone()
+            seq_lens_this_time[num_decodes:]=0
+            cu_seqlens_q = forward_meta.cu_seqlens_q.clone()
+            cu_seqlens_q[num_decodes+1:]=cu_seqlens_q[num_decodes]
+            out1=_test(qkv[:num_decode_tokens],seq_lens_this_time,cu_seqlens_q,paddle.zeros([256,1],dtype="int32"),seq_lens_decoder,batch_id_per_token)
+            if layer.layer_id == 0:
+                print("decoder attention output shape:", out1.shape)
+                print("decoder attention output:", out1)
+            output[:num_decode_tokens,:]=out1
+        # shape = [res_prefill[0] + res_decoder[0]] + list(res_prefill.shape[1:])
+        # if num_decode_tokens>0:
+        #     output[:num_decode_tokens]=res_decoder
+        # if num_prefill_tokens>0:
+        #     output[num_decode_tokens:]=res_prefill
+        return output

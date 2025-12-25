@@ -693,6 +693,11 @@ class GPUModelRunner(ModelRunnerBase):
                     f"need_prefilled_token_num={len(input_ids)}"
                     f"prompt_len={prompt_len}"
                 )
+                print("prefill_start_index:",prefill_start_index)
+                print("prefill_end_index:",prefill_end_index)
+                print("len(input_ids):",len(input_ids))
+                print("prompt_len:",prompt_len)
+                print("input_ids:",input_ids)
                 self.share_inputs["input_ids"][idx : idx + 1, :length] = np.array(
                     input_ids[prefill_start_index:prefill_end_index]
                 )
@@ -1312,6 +1317,7 @@ class GPUModelRunner(ModelRunnerBase):
             kv_tile_ids_per_batch=self.share_inputs["kv_tile_ids_per_batch"],
             kv_num_blocks_x_cpu=self.share_inputs["kv_num_blocks_x_cpu"],
             routing_replay_table=routing_replay_table,
+            num_running_requests=self.share_inputs["num_running_requests"],
         )
 
         dist_status = self.collect_distributed_status()
@@ -1342,9 +1348,9 @@ class GPUModelRunner(ModelRunnerBase):
         # Set forward_meta.is_dummy_or_profile_run to True to skip init_kv_signal_per_query for attention backends
         self.forward_meta.is_dummy_or_profile_run = is_dummy_or_profile_run
 
-        # Initialzie attention meta data
-        for attn_backend in self.attn_backends:
-            attn_backend.init_attention_metadata(self.forward_meta)
+        # # Initialzie attention meta data
+        # for attn_backend in self.attn_backends:
+        #     attn_backend.init_attention_metadata(self.forward_meta)
 
         # for zero size
         self.forward_meta.is_zero_size = self.forward_meta.ids_remove_padding.shape[0] == 0
@@ -2111,6 +2117,10 @@ class GPUModelRunner(ModelRunnerBase):
             if self.speculative_decoding:
                 if self.speculative_method == "mtp":
                     self.proposer.reorder_inputs()
+        
+        # Initialzie attention meta data
+        for attn_backend in self.attn_backends:
+            attn_backend.init_attention_metadata(self.forward_meta)
 
         self._prepare_inputs()
         self.sampler.pre_process(p_done_idxs)

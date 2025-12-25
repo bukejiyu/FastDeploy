@@ -641,6 +641,8 @@ class Ernie4_5_MoeForCausalLM(ModelForCasualLM):
         ids_remove_padding: paddle.Tensor,
         forward_meta: ForwardMeta,
     ):
+        print("最开始传入的token对么？")
+        print("ids_remove_padding:",ids_remove_padding)
         hidden_states = self.ernie(ids_remove_padding=ids_remove_padding, forward_meta=forward_meta)
 
         return hidden_states

@@ -378,6 +378,22 @@ def post_process_normal(
         )
 
     # 2. Update the input buffer of the model
+    print("update_inputs_v1 之前")
+    print("stop_flags:", model_output.stop_flags)
+    print("not_need_stop:", model_output.not_need_stop)
+    print("seq_lens_this_time:", model_output.seq_lens_this_time)
+    print("seq_lens_encoder:", model_output.seq_lens_encoder)
+    print("seq_lens_decoder:", model_output.seq_lens_decoder)
+    print("step_seq_lens_decoder:", share_inputs["step_seq_lens_decoder"])
+    print("prompt_lens:", share_inputs["prompt_lens"])
+    print("sampled_token_ids:", sampler_output.sampled_token_ids)
+    print("input_ids:", model_output.input_ids)
+    print("block_tables:", share_inputs["block_tables"])
+    print("stop_nums:", model_output.stop_nums)
+    print("next_tokens:", model_output.next_tokens)
+    print("is_block_step:", model_output.is_block_step)
+    print("block_size:", block_size)
+
     with paddle.framework._no_check_dy2st_diff():
         if envs.ENABLE_V1_KVCACHE_SCHEDULER:
             update_inputs_v1(
@@ -409,9 +425,27 @@ def post_process_normal(
                 model_output.is_block_step,
             )
 
+    print("update_inputs_v1 之后")
+    print("stop_flags:", model_output.stop_flags)
+    print("not_need_stop:", model_output.not_need_stop)
+    print("seq_lens_this_time:", model_output.seq_lens_this_time)
+    print("seq_lens_encoder:", model_output.seq_lens_encoder)
+    print("seq_lens_decoder:", model_output.seq_lens_decoder)
+    print("step_seq_lens_decoder:", share_inputs["step_seq_lens_decoder"])
+    print("prompt_lens:", share_inputs["prompt_lens"])
+    print("sampled_token_ids:", sampler_output.sampled_token_ids)
+    print("input_ids:", model_output.input_ids)
+    print("block_tables:", share_inputs["block_tables"])
+    print("stop_nums:", model_output.stop_nums)
+    print("next_tokens:", model_output.next_tokens)
+    print("is_block_step:", model_output.is_block_step)
+    print("block_size:", block_size)
     # 3. Transmit the model's output and stop generation signal via message queue.
     #    In the future, we will abandon this approach.
+    print("sampler_output:",sampler_output)
+    print("model_output.index_to_batch_id:",model_output.index_to_batch_id)
     recover_batch_index_for_sampler_output(sampler_output, model_output.index_to_batch_id)
+    print("after sampler_output:",sampler_output)
     if not skip_save_output:
         if envs.FD_USE_GET_SAVE_OUTPUT_V1:
             if save_each_rank or model_output.mp_rank == 0:
