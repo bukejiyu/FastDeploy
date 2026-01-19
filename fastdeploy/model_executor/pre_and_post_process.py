@@ -422,8 +422,9 @@ def post_process_normal(
     # 3. Transmit the model's output and stop generation signal via message queue.
     #    In the future, we will abandon this approach.
     if not skip_save_output:
+        print("sampler_output:",sampler_output)
+        print("model_output.index_to_batch_id:",model_output.index_to_batch_id)
         recover_batch_index_for_sampler_output(sampler_output, model_output.index_to_batch_id)
-    if not skip_save_output:
         if envs.FD_USE_GET_SAVE_OUTPUT_V1:
             if save_each_rank or model_output.mp_rank == 0:
                 recover_model_output_map = recover_batch_index_for_output(

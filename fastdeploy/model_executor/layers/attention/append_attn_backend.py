@@ -107,7 +107,7 @@ def allocate_launch_related_buffer(
     res["kv_num_blocks_x_cpu"] = paddle.full([1], 0, dtype="int32").cpu()
     return res
 
-
+save_idx=0
 class AppendAttentionBackend(AttentionBackend):
     """
     AppendAttentionBackend backend implementation.
@@ -228,6 +228,7 @@ class AppendAttentionBackend(AttentionBackend):
         k_pe: paddle.Tensor,
         layer: Attention,
         forward_meta: ForwardMeta,
+        **kwargs
     ) -> paddle.Tensor:
         """
         forward_mixed
@@ -261,7 +262,10 @@ class AppendAttentionBackend(AttentionBackend):
             cache_v = forward_meta.caches[2 * layer.layer_id + 1]
             cache_k_scales = getattr(layer, "cache_k_scale", None)
             cache_v_scales = getattr(layer, "cache_v_scale", None)
-
+        if layer.layer_id == 17:
+            global save_idx
+            paddle.save({"qkv":qkv},f"/workspace3/tbh/FastDeploy/append_17/qkv_{save_idx}.pdparams")
+            save_idx += 1
         if layer.layer_id == 0:
             # print(forward_meta.seq_lens_this_time)
             get_block_shape_and_split_kv_block(
@@ -433,4 +437,5 @@ class AppendAttentionBackend(AttentionBackend):
                 self.speculative_method is not None,
                 sliding_window,
             )
+        print("最终的输出:",res)
         return res

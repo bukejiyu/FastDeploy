@@ -1568,6 +1568,18 @@ class GPUModelRunner(ModelRunnerBase):
             encoder_block_shape_q=encoder_block_shape_q,
             decoder_block_shape_q=decoder_block_shape_q,
         )
+        # if hasattr(attn_backend,"allocate_launch_related_buffer"):
+        #     res_buffer = allocate_launch_related_buffer(
+        #         max_batch_size=self.scheduler_config.max_num_seqs,
+        #         max_model_len=self.model_config.max_model_len,
+        #         encoder_block_shape_q=encoder_block_shape_q,
+        #         decoder_block_shape_q=decoder_block_shape_q,
+        #         decoder_step_token_num=self.speculative_config.num_speculative_tokens + 1,
+        #         num_heads=num_heads,
+        #         kv_num_heads=self.model_config.kv_num_heads,
+        #         block_size=self.fd_config.cache_config.block_size,
+        #     )
+
 
         self.attn_backends.append(attn_backend)
 
@@ -2123,7 +2135,7 @@ class GPUModelRunner(ModelRunnerBase):
         """
         # 1. Prepare inputs of model and sampler.
         p_done_idxs = self._get_p_done_idxs_gd(model_forward_batch, num_running_requests)
-
+        print('self.share_inputs["block_tables"]',self.share_inputs["block_tables"])
         # Reorder inputs to split prefill and decode tokens
         self._process_reorder()
 
